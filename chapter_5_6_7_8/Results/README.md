@@ -1,0 +1,1 @@
+This folder needs to exist so that hyperparameter optimisation results can be stored in here.

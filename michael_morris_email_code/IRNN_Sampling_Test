@@ -1,0 +1,162 @@
+from turtle import pos
+import matplotlib.pyplot as plt
+import tensorflow as tf
+import tensorflow_probability as tfp
+from tensorflow_probability.python.distributions import kullback_leibler
+from sklearn.preprocessing import MinMaxScaler
+import matplotlib.pyplot as plt
+from scipy import interpolate
+import os
+import Metrics
+
+from IRNN_Bayes import *
+from scipy.stats import norm
+
+from train_functions import fit
+from DataConstructor import *
+import numpy as np
+import tqdm
+import datetime as dt
+import pandas as pd
+import time
+tfd = tfp.distributions
+
+
+window_size = 54
+batch_size = 32
+country = 'US'
+lag = {'US':14, 'UK':7}[country]
+test_season = 2015
+epochs = 1
+n_op = 100
+rnn_units = 256
+scale = 0.005
+kl_weight=1e-3
+op_scale=0.02
+gamma = 28
+test_season = 2015
+
+
+
+
+_data = DataConstructor(test_season = test_season, country=country, full_year=False, gamma = gamma, window_size = 54, teacher_forcing=True, n_queries = n_op-1)
+x_train, y_train, x_test, y_test = _data()
+
+
+n_op = 1
+x_train = tf.cast(x_train, tf.float32)[:,:,-n_op:]
+y_train = tf.cast(y_train, tf.float32)[:,:,-n_op:]
+x_test = tf.cast(x_test, tf.float32)[:,:,-n_op:]
+y_test = tf.cast(y_test, tf.float32)[:,:,-n_op:]
+
+train_dataset = tf.data.Dataset.from_tensor_slices((x_train, y_train))
+train_dataset = train_dataset.shuffle(buffer_size=1024).batch(batch_size)
+
+
+def loss_fn(y, p_y):
+    return -p_y.log_prob(y)
+
+optimizer = tf.optimizers.Adam(learning_rate=1e-3)
+
+n_samples = 3
+prediction_steps = 5
+
+_model = IRNN_Bayes(rnn_units = rnn_units, 
+                        gamma=gamma, 
+                        scale=scale, 
+                        kl_weight=kl_weight, 
+                        window_size=54, 
+                        project=0, 
+                        lag = lag,
+                        n_op=n_op, 
+                        n_samples=prediction_steps,
+                        op_scale=op_scale,
+                        sampling='always'
+                        )
+epochs = 100
+_model, history = fit(_model, 
+                        train_dataset,
+                        optimizer=optimizer, 
+                        epochs = epochs, 
+                        loss_fn = loss_fn,  
+                        prediction_steps = prediction_steps,
+                        speedy_training=False
+                        )
+
+
+
+y_pred = _model.predict(x_test, 25, verbose=True)
+
+
+mean_all = y_pred[0]
+std_all = y_pred[1]
+data_all = y_pred[2]['data']
+model_all = y_pred[2]['model']
+
+new_dates =  {2015: pd.date_range(dt.date(2015, 10, 19), dt.date(2016,5, 14)),
+            2016: pd.date_range(dt.date(2016, 10, 17), dt.date(2017,5, 13)),
+            2017: pd.date_range(dt.date(2017, 10, 18), dt.date(2018,5, 12)),
+            2018: pd.date_range(dt.date(2017, 10, 20), dt.date(2018,5, 11))}
+date_mask = [date in new_dates[test_season] for date in _data.test_dates]
+
+
+model_ls = []
+
+for g in range(28):
+    true = _data.ili_scaler.inverse_transform(y_test[:, g, -1:]).squeeze()
+    mean = _data.ili_scaler.inverse_transform(mean_all[:, g, -1:]).squeeze()
+    std = _data.ili_scaler.inverse_transform((mean_all+std_all)[:, g, -1:]).squeeze() - mean
+    data = _data.ili_scaler.inverse_transform((mean_all+data_all)[:, g, -1:]).squeeze() - mean
+    model = _data.ili_scaler.inverse_transform((mean_all+model_all)[:, g, -1:]).squeeze() - mean
+
+    df = pd.DataFrame(columns = ['True', 'Pred', 'Std', 'Data', 'Model'], 
+                        data = np.asarray([true, mean, std, data, model]).T)
+    df.to_csv('Results/Test/always' + country+'_Forecasts_'+str(test_season) + '-' + str(test_season-1999) + str(g+1) + 'days_ahead'+'.csv')
+
+    for idx, g in enumerate([0, 2, 6,13,20,27]):
+        true = _data.ili_scaler.inverse_transform(y_test[:, g, -1:]).squeeze()
+        mean = _data.ili_scaler.inverse_transform(mean_all[:, g, -1:]).squeeze()
+        std = _data.ili_scaler.inverse_transform((mean_all+std_all)[:, g, -1:]).squeeze() - mean
+        data = _data.ili_scaler.inverse_transform((mean_all+data_all)[:, g, -1:]).squeeze() - mean
+        model = _data.ili_scaler.inverse_transform((mean_all+model_all)[:, g, -1:]).squeeze() - mean
+
+        df = pd.DataFrame(columns = ['True', 'Pred', 'Std', 'Data', 'Model'], 
+                    data = np.asarray([true, mean, std, data, model]).T)
+                    
+        plt.subplot(3,2,int((idx+1)))
+        # plt.plot(_data.test_dates, true, color='black',label="$\gamma = $" + str(g+1))
+        # plt.plot(_data.test_dates, mean,color='red')
+        # # for n in [0.67, 1.96]:
+        # for n in [1]:
+        #     plt.fill_between(_data.test_dates,
+        #                     mean+n*std,
+        #                     mean-n*std,
+        #                     color='red',
+        #                     linewidth=0,
+        #                     alpha=0.3)
+        #     plt.plot(_data.test_dates, mean+n*data, color='blue', linewidth=1, alpha=0.5, label = '$\sigma_d$')
+        #     plt.plot(_data.test_dates, mean-n*data, color='blue', linewidth=1, alpha=0.5)
+        #     plt.plot(_data.test_dates, mean+n*model, color='green', linewidth=1, alpha=0.5, label = '$\sigma_m$')
+        #     plt.plot(_data.test_dates, mean-n*model, color='green', linewidth=1, alpha=0.5)
+        plt.plot(_data.test_dates, model, color='green', linewidth=1, alpha=0.5)
+        plt.legend()
+        plt.tight_layout()
+
+
+# Make data.
+from matplotlib import cm
+
+X = np.linspace(0, 217, 218)
+Y = np.linspace(1, 28, 28)
+X, Y = np.meshgrid(X, Y)
+
+
+plt.contourf(X, Y, model)
+
+fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+# Plot the surface.
+surf = ax.plot_surface(X, Y, model, cmap=cm.coolwarm,linewidth=1, antialiased=False)
+ax.set_xlabel('date')
+ax.set_ylabel('$\gamma$')
+ax.set_zlabel('Model Uncertainty')
+
